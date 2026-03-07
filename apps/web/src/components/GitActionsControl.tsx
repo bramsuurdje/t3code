@@ -1,6 +1,7 @@
 import type { GitStackedAction, GitStatusResult, ThreadId } from "@t3tools/contracts";
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isConventionalCommitSubject, sanitizeCommitSubject } from "@t3tools/shared/git";
 import { ChevronDownIcon, CloudUploadIcon, GitCommitIcon, InfoIcon } from "lucide-react";
 import { GitHubIcon } from "./Icons";
 import {
@@ -58,6 +59,17 @@ interface PendingDefaultBranchAction {
 }
 
 type GitActionToastId = ReturnType<typeof toastManager.add>;
+type RunGitActionWithToastInput = {
+  action: GitStackedAction;
+  commitMessage?: string;
+  forcePushOnlyProgress?: boolean;
+  onConfirmed?: () => void;
+  skipDefaultBranchPrompt?: boolean;
+  statusOverride?: GitStatusResult | null;
+  featureBranch?: boolean;
+  isDefaultBranchOverride?: boolean;
+  progressToastId?: GitActionToastId;
+};
 
 function getMenuActionDisabledReason(
   item: GitActionMenuItem,
@@ -117,7 +129,7 @@ function getMenuActionDisabledReason(
 
 const COMMIT_DIALOG_TITLE = "Commit changes";
 const COMMIT_DIALOG_DESCRIPTION =
-  "Review and confirm your commit. Leave the message blank to auto-generate one.";
+  "Review and confirm your commit. Leave the message blank to auto-generate a conventional commit.";
 
 function GitActionItemIcon({ icon }: { icon: GitActionIconName }) {
   if (icon === "commit") return <GitCommitIcon />;
@@ -148,6 +160,23 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
   const [dialogCommitMessage, setDialogCommitMessage] = useState("");
   const [pendingDefaultBranchAction, setPendingDefaultBranchAction] =
     useState<PendingDefaultBranchAction | null>(null);
+  const runGitActionWithToastRef = useRef<((input: RunGitActionWithToastInput) => void) | null>(
+    null,
+  );
+  const dialogCommitMessageError = useMemo(() => {
+    const trimmedMessage = dialogCommitMessage.trim();
+    if (trimmedMessage.length === 0) {
+      return null;
+    }
+
+    const [subjectLine] = trimmedMessage.split(/\r?\n/g);
+    const subject = sanitizeCommitSubject(subjectLine ?? "");
+    if (isConventionalCommitSubject(subject)) {
+      return null;
+    }
+
+    return "Use a conventional commit subject like `fix(editor): preserve selection`.";
+  }, [dialogCommitMessage]);
 
   const { data: gitStatus = null, error: gitStatusError } = useQuery(gitStatusQueryOptions(gitCwd));
 
@@ -229,10 +258,10 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
         data: threadToastData,
       });
     });
-  }, [gitStatusForActions?.pr?.state, gitStatusForActions?.pr?.url, threadToastData]);
+  }, [gitStatusForActions, threadToastData]);
 
   const runGitActionWithToast = useCallback(
-    async ({
+    ({
       action,
       commitMessage,
       forcePushOnlyProgress = false,
@@ -242,17 +271,7 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
       featureBranch = false,
       isDefaultBranchOverride,
       progressToastId,
-    }: {
-      action: GitStackedAction;
-      commitMessage?: string;
-      forcePushOnlyProgress?: boolean;
-      onConfirmed?: () => void;
-      skipDefaultBranchPrompt?: boolean;
-      statusOverride?: GitStatusResult | null;
-      featureBranch?: boolean;
-      isDefaultBranchOverride?: boolean;
-      progressToastId?: GitActionToastId;
-    }) => {
+    }: RunGitActionWithToastInput) => {
       const actionStatus = statusOverride ?? gitStatusForActions;
       const actionBranch = actionStatus?.branch ?? null;
       const actionIsDefaultBranch = isDefaultBranchOverride ?? (featureBranch ? false : isDefaultBranch);
@@ -326,91 +345,93 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
         ...(featureBranch ? { featureBranch } : {}),
       });
 
-      try {
-        const result = await promise;
-        stopProgressUpdates();
-        const resultToast = summarizeGitResult(result);
+      void promise
+        .then((result) => {
+          stopProgressUpdates();
+          const resultToast = summarizeGitResult(result);
 
-        const existingOpenPrUrl = actionStatus?.pr?.state === "open" ? actionStatus.pr.url : undefined;
-        const prUrl = result.pr.url ?? existingOpenPrUrl;
-        const shouldOfferPushCta = action === "commit" && result.commit.status === "created";
-        const shouldOfferOpenPrCta =
-          (action === "commit_push" || action === "commit_push_pr") &&
-          !!prUrl &&
-          (!actionIsDefaultBranch ||
-            result.pr.status === "created" ||
-            result.pr.status === "opened_existing");
-        const shouldOfferCreatePrCta =
-          action === "commit_push" &&
-          !prUrl &&
-          result.push.status === "pushed" &&
-          !actionIsDefaultBranch;
-        const closeResultToast = () => {
-          toastManager.close(resolvedProgressToastId);
-        };
+          const existingOpenPrUrl =
+            actionStatus?.pr?.state === "open" ? actionStatus.pr.url : undefined;
+          const prUrl = result.pr.url ?? existingOpenPrUrl;
+          const shouldOfferPushCta = action === "commit" && result.commit.status === "created";
+          const shouldOfferOpenPrCta =
+            (action === "commit_push" || action === "commit_push_pr") &&
+            !!prUrl &&
+            (!actionIsDefaultBranch ||
+              result.pr.status === "created" ||
+              result.pr.status === "opened_existing");
+          const shouldOfferCreatePrCta =
+            action === "commit_push" &&
+            !prUrl &&
+            result.push.status === "pushed" &&
+            !actionIsDefaultBranch;
+          const closeResultToast = () => {
+            toastManager.close(resolvedProgressToastId);
+          };
 
-        toastManager.update(resolvedProgressToastId, {
-          type: "success",
-          title: resultToast.title,
-          description: resultToast.description,
-          timeout: 0,
-          data: {
-            ...threadToastData,
-            dismissAfterVisibleMs: 10_000,
-          },
-          ...(shouldOfferPushCta
-            ? {
-                actionProps: {
-                  children: "Push",
-                  onClick: () => {
-                    void runGitActionWithToast({
-                      action: "commit_push",
-                      forcePushOnlyProgress: true,
-                      onConfirmed: closeResultToast,
-                      statusOverride: actionStatus,
-                      isDefaultBranchOverride: actionIsDefaultBranch,
-                    });
-                  },
-                },
-              }
-            : shouldOfferOpenPrCta
+          toastManager.update(resolvedProgressToastId, {
+            type: "success",
+            title: resultToast.title,
+            description: resultToast.description,
+            timeout: 0,
+            data: {
+              ...threadToastData,
+              dismissAfterVisibleMs: 10_000,
+            },
+            ...(shouldOfferPushCta
               ? {
                   actionProps: {
-                    children: "Open PR",
+                    children: "Push",
                     onClick: () => {
-                      const api = readNativeApi();
-                      if (!api) return;
-                      closeResultToast();
-                      void api.shell.openExternal(prUrl);
+                      void runGitActionWithToastRef.current?.({
+                        action: "commit_push",
+                        forcePushOnlyProgress: true,
+                        onConfirmed: closeResultToast,
+                        statusOverride: actionStatus,
+                        isDefaultBranchOverride: actionIsDefaultBranch,
+                      });
                     },
                   },
                 }
-              : shouldOfferCreatePrCta
+              : shouldOfferOpenPrCta
                 ? {
                     actionProps: {
-                      children: "Create PR",
+                      children: "Open PR",
                       onClick: () => {
+                        const api = readNativeApi();
+                        if (!api) return;
                         closeResultToast();
-                        void runGitActionWithToast({
-                          action: "commit_push_pr",
-                          forcePushOnlyProgress: true,
-                          statusOverride: actionStatus,
-                          isDefaultBranchOverride: actionIsDefaultBranch,
-                        });
+                        void api.shell.openExternal(prUrl);
                       },
                     },
                   }
-                : {}),
+                : shouldOfferCreatePrCta
+                  ? {
+                      actionProps: {
+                        children: "Create PR",
+                        onClick: () => {
+                          closeResultToast();
+                          void runGitActionWithToastRef.current?.({
+                            action: "commit_push_pr",
+                            forcePushOnlyProgress: true,
+                            statusOverride: actionStatus,
+                            isDefaultBranchOverride: actionIsDefaultBranch,
+                          });
+                        },
+                      },
+                    }
+                  : {}),
+          });
+        })
+        .catch((err) => {
+          stopProgressUpdates();
+          toastManager.update(resolvedProgressToastId, {
+            type: "error",
+            title: "Action failed",
+            description: err instanceof Error ? err.message : "An error occurred.",
+            data: threadToastData,
+          });
         });
-      } catch (err) {
-        stopProgressUpdates();
-        toastManager.update(resolvedProgressToastId, {
-          type: "error",
-          title: "Action failed",
-          description: err instanceof Error ? err.message : "An error occurred.",
-          data: threadToastData,
-        });
-      }
     },
 
     [
@@ -421,6 +442,9 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
       gitStatusForActions,
     ],
   );
+  useEffect(() => {
+    runGitActionWithToastRef.current = runGitActionWithToast;
+  }, [runGitActionWithToast]);
 
   const continuePendingDefaultBranchAction = useCallback(() => {
     if (!pendingDefaultBranchAction) return;
@@ -465,6 +489,16 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
 
   const runDialogActionOnNewBranch = useCallback(() => {
     if (!isCommitDialogOpen) return;
+    if (dialogCommitMessageError) {
+      toastManager.add({
+        type: "error",
+        title: "Invalid commit message",
+        description: dialogCommitMessageError,
+        data: threadToastData,
+      });
+      return;
+    }
+
     const commitMessage = dialogCommitMessage.trim();
 
     setIsCommitDialogOpen(false);
@@ -474,7 +508,13 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
       action: "commit",
       ...(commitMessage ? { commitMessage } : {}),
     });
-  }, [isCommitDialogOpen, dialogCommitMessage, checkoutNewBranchAndRunAction]);
+  }, [
+    checkoutNewBranchAndRunAction,
+    dialogCommitMessage,
+    dialogCommitMessageError,
+    isCommitDialogOpen,
+    threadToastData,
+  ]);
 
   const runQuickAction = useCallback(() => {
     if (quickAction.kind === "open_pr") {
@@ -538,6 +578,16 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
 
   const runDialogAction = useCallback(() => {
     if (!isCommitDialogOpen) return;
+    if (dialogCommitMessageError) {
+      toastManager.add({
+        type: "error",
+        title: "Invalid commit message",
+        description: dialogCommitMessageError,
+        data: threadToastData,
+      });
+      return;
+    }
+
     const commitMessage = dialogCommitMessage.trim();
     setIsCommitDialogOpen(false);
     setDialogCommitMessage("");
@@ -547,10 +597,12 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
     });
   }, [
     dialogCommitMessage,
+    dialogCommitMessageError,
     isCommitDialogOpen,
     runGitActionWithToast,
     setDialogCommitMessage,
     setIsCommitDialogOpen,
+    threadToastData,
   ]);
 
   const openChangedFileInEditor = useCallback(
@@ -774,9 +826,20 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
               <Textarea
                 value={dialogCommitMessage}
                 onChange={(event) => setDialogCommitMessage(event.target.value)}
-                placeholder="Leave empty to auto-generate"
+                aria-invalid={dialogCommitMessageError ? true : undefined}
+                placeholder={"fix(editor): preserve selection\n\n- explain follow-up detail"}
                 size="sm"
               />
+              <p
+                className={
+                  dialogCommitMessageError
+                    ? "text-xs text-destructive"
+                    : "text-xs text-muted-foreground"
+                }
+              >
+                {dialogCommitMessageError ??
+                  "Use conventional commits on the first line. Leave blank to auto-generate one."}
+              </p>
             </div>
           </DialogPanel>
           <DialogFooter>
@@ -790,10 +853,15 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
             >
               Cancel
             </Button>
-            <Button variant="outline" size="sm" onClick={runDialogActionOnNewBranch}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={runDialogActionOnNewBranch}
+              disabled={dialogCommitMessageError !== null}
+            >
               Commit on new branch
             </Button>
-            <Button size="sm" onClick={runDialogAction}>
+            <Button size="sm" onClick={runDialogAction} disabled={dialogCommitMessageError !== null}>
               Commit
             </Button>
           </DialogFooter>

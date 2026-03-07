@@ -27,7 +27,7 @@
   },
   "scripts": {
     "prepare": "effect-language-service patch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "./node_modules/typescript/bin/tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {

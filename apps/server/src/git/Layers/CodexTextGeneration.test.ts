@@ -210,6 +210,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGenerationLive", (it) => {
         });
 
         expect(generated.subject.length).toBeLessThanOrEqual(72);
+        expect(generated.subject.startsWith("chore: ")).toBe(true);
         expect(generated.subject.endsWith(".")).toBe(false);
         expect(generated.body).toBe("- added migration\n- updated tests");
         expect(generated.branch).toBeUndefined();
@@ -238,7 +239,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGenerationLive", (it) => {
           includeBranch: true,
         });
 
-        expect(generated.subject).toBe("Add important change");
+        expect(generated.subject).toBe("chore: add important change");
         expect(generated.branch).toBe("feature/fix/important-system-change");
       }),
     ),

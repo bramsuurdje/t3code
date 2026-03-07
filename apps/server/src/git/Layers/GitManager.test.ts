@@ -6,7 +6,7 @@ import { it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, PlatformError, Scope } from "effect";
 import { expect } from "vitest";
 
-import { GitCommandError, GitHubCliError, TextGenerationError } from "../Errors.ts";
+import { GitCommandError, GitHubCliError, GitManagerError, TextGenerationError } from "../Errors.ts";
 import { type GitManagerShape } from "../Services/GitManager.ts";
 import {
   type GitHubCliShape,
@@ -110,7 +110,7 @@ function createTextGeneration(overrides: Partial<FakeGitTextGeneration> = {}): T
   const implementation: FakeGitTextGeneration = {
     generateCommitMessage: (input) =>
       Effect.succeed({
-        subject: "Implement stacked git actions",
+        subject: "feat: implement stacked git actions",
         body: "",
         ...(input.includeBranch
           ? { branch: "feature/implement-stacked-git-actions" }
@@ -491,7 +491,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         yield* runGit(repoDir, ["log", "-1", "--pretty=%s"]).pipe(
           Effect.map((result) => result.stdout.trim()),
         ),
-      ).toBe("Implement stacked git actions");
+      ).toBe("feat: implement stacked git actions");
     }),
   );
 
@@ -618,7 +618,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       });
 
       expect(result.branch.status).toBe("created");
-      expect(result.branch.name).toBe("feature/feat-custom-summary-line");
+      expect(result.branch.name).toBe("feature/custom-summary-line");
       expect(result.commit.status).toBe("created");
       expect(result.commit.subject).toBe("feat: custom summary line");
       expect(generatedCount).toBe(0);
@@ -630,6 +630,26 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         Effect.map((r) => r.stdout.trim()),
       );
       expect(mergeBase).toBe(mainSha);
+    }),
+  );
+
+  it.effect("rejects custom commit messages that are not conventional commits", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      fs.writeFileSync(path.join(repoDir, "README.md"), "hello\ncustom-invalid\n");
+
+      const { manager } = yield* makeManager();
+      const error = yield* manager
+        .runStackedAction({
+          cwd: repoDir,
+          action: "commit",
+          commitMessage: "Improve commit dialog",
+        })
+        .pipe(Effect.flip);
+
+      expect(error).toBeInstanceOf(GitManagerError);
+      expect(error.message).toContain("conventional commit format");
     }),
   );
 

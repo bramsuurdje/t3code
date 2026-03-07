@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
 
 import { Effect, FileSystem, Layer, Path } from "effect";
-import { resolveAutoFeatureBranchName, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import {
+  ensureConventionalCommitSubject,
+  isConventionalCommitSubject,
+  resolveAutoFeatureBranchName,
+  sanitizeCommitSubject,
+  sanitizeFeatureBranchName,
+  stripConventionalCommitPrefix,
+} from "@t3tools/shared/git";
 
 import { GitManagerError } from "../Errors.ts";
 import { GitManager, type GitManagerShape } from "../Services/GitManager.ts";
@@ -95,11 +102,8 @@ function sanitizeCommitMessage(generated: {
   body: string;
   branch?: string | undefined;
 } {
-  const rawSubject = generated.subject.trim().split(/\r?\n/g)[0]?.trim() ?? "";
-  const subject = rawSubject.replace(/[.]+$/g, "").trim();
-  const safeSubject = subject.length > 0 ? subject.slice(0, 72).trimEnd() : "Update project files";
   return {
-    subject: safeSubject,
+    subject: ensureConventionalCommitSubject(generated.subject),
     body: generated.body.trim(),
     ...(generated.branch !== undefined ? { branch: generated.branch } : {}),
   };
@@ -120,14 +124,16 @@ function formatCommitMessage(subject: string, body: string): string {
   return `${subject}\n\n${trimmedBody}`;
 }
 
-function parseCustomCommitMessage(raw: string): { subject: string; body: string } | null {
+function parseCustomCommitMessage(
+  raw: string,
+): { subject: string; body: string; isConventional: boolean } | null {
   const normalized = raw.replace(/\r\n/g, "\n").trim();
   if (normalized.length === 0) {
     return null;
   }
 
   const [firstLine, ...rest] = normalized.split("\n");
-  const subject = firstLine?.trim() ?? "";
+  const subject = sanitizeCommitSubject(firstLine ?? "");
   if (subject.length === 0) {
     return null;
   }
@@ -135,6 +141,7 @@ function parseCustomCommitMessage(raw: string): { subject: string; body: string 
   return {
     subject,
     body: rest.join("\n").trim(),
+    isConventional: isConventionalCommitSubject(subject),
   };
 }
 
@@ -290,11 +297,22 @@ export const makeGitManager = Effect.gen(function* () {
 
       const customCommit = parseCustomCommitMessage(input.commitMessage ?? "");
       if (customCommit) {
+        if (!customCommit.isConventional) {
+          return yield* gitManagerError(
+            "resolveCommitAndBranchSuggestion",
+            "Custom commit messages must use conventional commit format, for example `fix(editor): preserve selection`.",
+          );
+        }
+
         return {
           subject: customCommit.subject,
           body: customCommit.body,
           ...(input.includeBranch
-            ? { branch: sanitizeFeatureBranchName(customCommit.subject) }
+            ? {
+                branch: sanitizeFeatureBranchName(
+                  stripConventionalCommitPrefix(customCommit.subject),
+                ),
+              }
             : {}),
           commitMessage: formatCommitMessage(customCommit.subject, customCommit.body),
         };

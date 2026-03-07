@@ -3,7 +3,11 @@ import { randomUUID } from "node:crypto";
 import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import {
+  ensureConventionalCommitSubject,
+  sanitizeBranchFragment,
+  sanitizeFeatureBranchName,
+} from "@t3tools/shared/git";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -72,19 +76,6 @@ function limitSection(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
   const truncated = value.slice(0, maxChars);
   return `${truncated}\n\n[truncated]`;
-}
-
-function sanitizeCommitSubject(raw: string): string {
-  const singleLine = raw.trim().split(/\r?\n/g)[0]?.trim() ?? "";
-  const withoutTrailingPeriod = singleLine.replace(/[.]+$/g, "").trim();
-  if (withoutTrailingPeriod.length === 0) {
-    return "Update project files";
-  }
-
-  if (withoutTrailingPeriod.length <= 72) {
-    return withoutTrailingPeriod;
-  }
-  return withoutTrailingPeriod.slice(0, 72).trimEnd();
 }
 
 function sanitizePrTitle(raw: string): string {
@@ -321,6 +312,8 @@ const makeCodexTextGeneration = Effect.gen(function* () {
         ? "Return a JSON object with keys: subject, body, branch."
         : "Return a JSON object with keys: subject, body.",
       "Rules:",
+      "- subject must use conventional commits: type(scope): description",
+      "- allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert",
       "- subject must be imperative, <= 72 chars, and no trailing period",
       "- body can be empty string or short bullet points",
       ...(wantsBranch
@@ -357,7 +350,7 @@ const makeCodexTextGeneration = Effect.gen(function* () {
       Effect.map(
         (generated) =>
           ({
-            subject: sanitizeCommitSubject(generated.subject),
+            subject: ensureConventionalCommitSubject(generated.subject),
             body: generated.body.trim(),
             ...("branch" in generated && typeof generated.branch === "string"
               ? { branch: sanitizeFeatureBranchName(generated.branch) }
